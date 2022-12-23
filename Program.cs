@@ -29,6 +29,7 @@ class Program
         Array.Sort(gitfolders);
 
         var processes = new List<Process>();
+        var processFolders = new List<string>();
 
         foreach (var gitfolder in gitfolders)
         {
@@ -41,20 +42,48 @@ class Program
             Console.WriteLine($"Pulling {Path.GetFileName(gitfolder)}...");
             Console.ResetColor();
 
-            var startInfo = new ProcessStartInfo("git", "pull -r");
-            startInfo.WorkingDirectory = gitfolder;
+            var startInfo = new ProcessStartInfo("git", "pull -r") { WorkingDirectory = gitfolder };
 
             var p = Process.Start(startInfo);
 
             if (p != null)
             {
                 processes.Add(p);
+                processFolders.Add(gitfolder);
             }
         }
 
+        int logtimer = 0;
         while (processes.Where(p => { p.Refresh(); return !p.HasExited; }).Count() > 0)
         {
             Thread.Sleep(100);
+
+            logtimer++;
+            if (logtimer % 10 == 0)
+            {
+                var stillRunning = new List<int>();
+                for (int i = 0; i < processes.Count; i++)
+                {
+                    processes[i].Refresh();
+                    if (!processes[i].HasExited)
+                    {
+                        stillRunning.Add(i);
+                    }
+                }
+
+                if (logtimer < 100)
+                {
+                    Console.WriteLine($"Still running: {string.Join(", ", stillRunning.Select(i => processFolders[i]))}");
+                }
+                else
+                {
+                    foreach (var i in stillRunning)
+                    {
+                        Console.WriteLine($"Killing: '{processFolders[i]}'");
+                        processes[i].Kill(entireProcessTree: true);
+                    }
+                }
+            }
         }
     }
 }
