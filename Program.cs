@@ -9,13 +9,20 @@ class Program
 {
     public static void Main(string[] args)
     {
+        var parsedArgs = args;
+
+        var recurse = parsedArgs.Contains("-r");
+        parsedArgs = parsedArgs.Where(a => a != "-r").ToArray();
+
         var rootfolder = ".";
-        if (args.Length == 1)
+        if (parsedArgs.Length == 1)
         {
-            rootfolder = args[0];
+            rootfolder = parsedArgs[0];
         }
 
-        var gitfolders = Directory.GetDirectories(rootfolder).Where(d => Directory.Exists(Path.Combine(d, ".git"))).ToArray();
+        var folders = recurse ? Directory.GetDirectories(rootfolder, string.Empty, SearchOption.AllDirectories) : Directory.GetDirectories(rootfolder);
+
+        var gitfolders = folders.Where(d => Directory.Exists(Path.Combine(d, ".git"))).ToArray();
 
         Console.WriteLine($"Found {gitfolders.Length} repos.");
 
