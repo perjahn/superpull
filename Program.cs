@@ -6,12 +6,24 @@ using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
-using Newtonsoft.Json.Linq;
+using System.Threading.Tasks;
+
+public class GithubRepository
+{
+    public string name { get; set; } = string.Empty;
+    public string clone_url { get; set; } = string.Empty;
+}
 
 class Program
 {
-    public static int Main(string[] args)
+    static Uri BaseAdress { get; set; } = new Uri("https://api.github.com");
+    static ProductInfoHeaderValue UserAgent { get; set; } = new ProductInfoHeaderValue("useragent", "1.0");
+    static int PerPage { get; set; } = 100;
+    static int Throttle { get; set; } = 30;
+
+    public static async Task<int> Main(string[] args)
     {
         var parsedArgs = args;
 
@@ -19,7 +31,7 @@ class Program
         {
             var username = Environment.GetEnvironmentVariable("GITHUB_USERNAME") ?? string.Empty;
             var password = Environment.GetEnvironmentVariable("GITHUB_PASSWORD") ?? string.Empty;
-            SuperClone($"{parsedArgs[1]}", username, password);
+            await SuperClone($"{parsedArgs[1]}", username, password);
             return 0;
         }
 
@@ -29,7 +41,8 @@ class Program
         if (parsedArgs.Length != 1 && parsedArgs.Length != 2)
         {
             Console.WriteLine("Usage: superpull [-r] <folder>");
-            Console.WriteLine("Usage: superpull <ghclone> <username/orgname>");
+            Console.WriteLine("Usage: superpull ghclone orgs/<orgname>");
+            Console.WriteLine("Usage: superpull ghclone users/<username>");
             return 1;
         }
 
@@ -43,7 +56,7 @@ class Program
         return 0;
     }
 
-    private static void SuperPull(bool recurse, string rootfolder)
+    static void SuperPull(bool recurse, string rootfolder)
     {
         var watch = Stopwatch.StartNew();
 
@@ -60,7 +73,7 @@ class Program
 
         foreach (var gitfolder in gitfolders)
         {
-            while (processes.Where(p => { p.Refresh(); return !p.HasExited; }).Count() > 20)
+            while (processes.Count(p => { p.Refresh(); return !p.HasExited; }) > Throttle)
             {
                 Thread.Sleep(100);
             }
@@ -79,13 +92,13 @@ class Program
             }
         }
 
-        int logtimer = 0;
-        while (processes.Where(p => { p.Refresh(); return !p.HasExited; }).Count() > 0)
+        var timer = Stopwatch.StartNew();
+        var nextMessage = TimeSpan.FromSeconds(10);
+        while (processes.Any(p => { p.Refresh(); return !p.HasExited; }))
         {
             Thread.Sleep(100);
 
-            logtimer++;
-            if (logtimer % 10 == 0)
+            if (timer.Elapsed > nextMessage)
             {
                 var stillRunning = new List<int>();
                 for (int i = 0; i < processes.Count; i++)
@@ -97,9 +110,10 @@ class Program
                     }
                 }
 
-                if (logtimer < 100)
+                if (timer.Elapsed < TimeSpan.FromMinutes(1))
                 {
                     Console.WriteLine($"Still running: {string.Join(", ", stillRunning.Select(i => processFolders[i]))}");
+                    nextMessage += TimeSpan.FromSeconds(10);
                 }
                 else
                 {
@@ -112,14 +126,14 @@ class Program
             }
         }
 
-        Console.WriteLine($"Time: ({watch.Elapsed})");
+        Console.WriteLine($"Done: {watch.Elapsed}");
     }
 
-    static void SuperClone(string baseurl, string username, string password)
+    static async Task SuperClone(string entity, string username, string password)
     {
         var watch = Stopwatch.StartNew();
 
-        var repourls = GetRepoUrls(baseurl, username, password);
+        var repourls = await GetRepoUrls(entity, username, password);
 
         Console.WriteLine($"Got {repourls.Length} repo urls.");
 
@@ -137,16 +151,28 @@ class Program
                 continue;
             }
 
-            while (processes.Where(p => { p.Refresh(); return !p.HasExited; }).Count() > 20)
+            while (processes.Count(p => { p.Refresh(); return !p.HasExited; }) > Throttle)
             {
                 Thread.Sleep(100);
             }
 
             Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine($"Cloning: '{MaskCredentials(repourl)}' -> '{gitfolder}'");
+            Console.WriteLine($"Cloning: '{repourl}' -> '{gitfolder}'");
             Console.ResetColor();
 
-            var p = Process.Start("git", $"clone {repourl} {gitfolder}");
+            var repourlWithCredentials = repourl;
+            if (username != string.Empty && password != string.Empty)
+            {
+                var index = repourl.IndexOf("://");
+                if (index < 0)
+                {
+                    Console.WriteLine($"Invalid repo url: '{repourl}'");
+                    continue;
+                }
+                repourlWithCredentials = $"{repourl[..(index + 3)]}{username}:{password}@{repourl[(index + 3)..]}";
+            }
+
+            var p = Process.Start("git", $"clone {repourlWithCredentials} {gitfolder}");
             if (p != null)
             {
                 processes.Add(p);
@@ -154,16 +180,15 @@ class Program
             }
         }
 
-        Console.WriteLine($"Time: ({watch.Elapsed})");
+        Console.WriteLine($"Done: {watch.Elapsed}");
     }
 
-    static string[] GetRepoUrls(string baseurl, string username, string password)
+    static async Task<string[]> GetRepoUrls(string entity, string username, string password)
     {
         var repourls = new List<string>();
 
-        using var client = new HttpClient();
-        client.BaseAddress = new Uri("https://api.github.com");
-        client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("gitpull", "1.0"));
+        using var client = new HttpClient() { BaseAddress = BaseAdress };
+        client.DefaultRequestHeaders.UserAgent.Add(UserAgent);
         var creds = string.Empty;
         if (username != string.Empty && password != string.Empty)
         {
@@ -171,65 +196,59 @@ class Program
             client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes(creds)));
         }
 
-        var pagenum = 1;
-        bool hasrepo = false;
-        do
+        var address = $"{entity}/repos?per_page={PerPage}";
+        while (address != string.Empty)
         {
-            Console.WriteLine($"Getting page: {pagenum}");
-            var url = $"{baseurl}/repos?page={pagenum}";
-            var repositories = new JArray();
-            using var request = new HttpRequestMessage(HttpMethod.Get, url);
-            using var response = client.Send(request);
+            Console.WriteLine($"Getting repos: '{address}'");
 
-            var jsonString = response.Content.ReadAsStringAsync();
-            jsonString.Wait();
-            var json = jsonString.Result;
-            if (!response.IsSuccessStatusCode || !TryParseJArray(json, out repositories))
+            var content = string.Empty;
+            try
             {
-                Console.WriteLine($"Warning: {response.StatusCode} ({response.ReasonPhrase}): {json}");
-            }
+                var response = await client.GetAsync(address);
+                if (!response.IsSuccessStatusCode)
+                {
+                    Console.WriteLine($"Get '{address}', StatusCode: {response.StatusCode}");
+                }
+                content = await response.Content.ReadAsStringAsync();
+                if (!response.IsSuccessStatusCode)
+                {
+                    Console.WriteLine($"Result: >>>{content}<<<");
+                }
+                address = GetNextLink(response.Headers);
 
-            hasrepo = false;
-            foreach (var repo in repositories)
+                var jsonarray = JsonSerializer.Deserialize<GithubRepository[]>(content) ?? new GithubRepository[] { };
+
+                repourls.AddRange(jsonarray.Select(repo => repo.clone_url.EndsWith(".git") ? repo.clone_url[..^4] : repo.clone_url));
+            }
+            catch (Exception ex)
             {
-                var repourl = repo["clone_url"]?.Value<string>() ?? string.Empty;
-                if (repourl.EndsWith(".git"))
-                {
-                    repourl = repourl.Substring(0, repourl.Length - 4);
-                }
-                if (creds != string.Empty)
-                {
-                    if (repourl.StartsWith("https://"))
-                    {
-                        repourl = $"{repourl.Substring(0, 8)}{creds}@{repourl.Substring(8)}";
-                    }
-                }
-                if (repourl != string.Empty)
-                {
-                    repourls.Add(repourl);
-                }
-                hasrepo = true;
+                Console.WriteLine($"Get '{address}'");
+                Console.WriteLine($"Result: >>>{content}<<<");
+                Console.WriteLine($"Exception: >>>{ex}<<<");
+                continue;
             }
-
-            pagenum++;
         }
-        while (hasrepo);
 
         return repourls.ToArray();
     }
 
-    static bool TryParseJArray(string json, out JArray jarray)
+    static string GetNextLink(HttpResponseHeaders headers)
     {
-        try
+        if (headers.Contains("Link"))
         {
-            jarray = JArray.Parse(json);
-            return true;
+            var links = headers.GetValues("Link").SelectMany(l => l.Split(',')).ToArray();
+            foreach (var link in links)
+            {
+                var parts = link.Split(';');
+                if (parts.Length == 2 && parts[0].Trim().StartsWith('<') && parts[0].Trim().EndsWith('>') && parts[1].Trim() == "rel=\"next\"")
+                {
+                    var url = parts[0].Trim()[1..^1];
+                    return url;
+                }
+            }
         }
-        catch
-        {
-            jarray = new JArray();
-            return false;
-        }
+
+        return string.Empty;
     }
 
     static string CleanName(string url)
@@ -238,7 +257,7 @@ class Program
         var index = foldername.LastIndexOf("/");
         if (index >= 0)
         {
-            foldername = foldername.Substring(index + 1);
+            foldername = foldername[(index + 1)..];
         }
 
         var sb = new StringBuilder();
@@ -252,20 +271,5 @@ class Program
             cleanname = cleanname.Replace("__", "_");
         }
         return cleanname;
-    }
-
-    static string MaskCredentials(string repourl)
-    {
-        var indexStart = repourl.IndexOf("//");
-        if (indexStart < 0)
-        {
-            return repourl;
-        }
-        var indexEnd = repourl.IndexOf('@', indexStart);
-        if (indexEnd < 0)
-        {
-            return repourl;
-        }
-        return $"{repourl.Substring(0, indexStart + 2)}***{repourl.Substring(indexEnd)}";
     }
 }
