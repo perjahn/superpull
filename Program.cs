@@ -18,8 +18,8 @@ public class GithubRepository
 
 class Program
 {
-    static Uri BaseAdress { get; set; } = new Uri("https://api.github.com");
-    static ProductInfoHeaderValue UserAgent { get; set; } = new ProductInfoHeaderValue("useragent", "1.0");
+    static Uri BaseAdress { get; set; } = new("https://api.github.com");
+    static ProductInfoHeaderValue UserAgent { get; set; } = new("useragent", "1.0");
     static int PerPage { get; set; } = 100;
     static int Throttle { get; set; } = 30;
 
@@ -29,9 +29,8 @@ class Program
 
         if (parsedArgs.Length == 2 && parsedArgs[0] == "ghclone")
         {
-            var username = Environment.GetEnvironmentVariable("GITHUB_USERNAME") ?? string.Empty;
-            var password = Environment.GetEnvironmentVariable("GITHUB_PASSWORD") ?? string.Empty;
-            await SuperClone($"{parsedArgs[1]}", username, password);
+            var githubtoken = Environment.GetEnvironmentVariable("GITHUB_TOKEN") ?? string.Empty;
+            await SuperClone($"{parsedArgs[1]}", githubtoken);
             return 0;
         }
 
@@ -129,11 +128,11 @@ class Program
         Console.WriteLine($"Done: {watch.Elapsed}");
     }
 
-    static async Task SuperClone(string entity, string username, string password)
+    static async Task SuperClone(string entity, string githubtoken)
     {
         var watch = Stopwatch.StartNew();
 
-        var repourls = await GetRepoUrls(entity, username, password);
+        var repourls = await GetRepoUrls(entity, githubtoken);
 
         Console.WriteLine($"Got {repourls.Length} repo urls.");
 
@@ -153,7 +152,7 @@ class Program
 
             while (processes.Count(p => { p.Refresh(); return !p.HasExited; }) > Throttle)
             {
-                Thread.Sleep(100);
+                await Task.Delay(100);
             }
 
             Console.ForegroundColor = ConsoleColor.Green;
@@ -161,7 +160,7 @@ class Program
             Console.ResetColor();
 
             var repourlWithCredentials = repourl;
-            if (username != string.Empty && password != string.Empty)
+            if (githubtoken != string.Empty)
             {
                 var index = repourl.IndexOf("://");
                 if (index < 0)
@@ -169,7 +168,7 @@ class Program
                     Console.WriteLine($"Invalid repo url: '{repourl}'");
                     continue;
                 }
-                repourlWithCredentials = $"{repourl[..(index + 3)]}{username}:{password}@{repourl[(index + 3)..]}";
+                repourlWithCredentials = $"{repourl[..(index + 3)]}{githubtoken}@{repourl[(index + 3)..]}";
             }
 
             var p = Process.Start("git", $"clone {repourlWithCredentials} {gitfolder}");
@@ -183,17 +182,16 @@ class Program
         Console.WriteLine($"Done: {watch.Elapsed}");
     }
 
-    static async Task<string[]> GetRepoUrls(string entity, string username, string password)
+    static async Task<string[]> GetRepoUrls(string entity, string githubtoken)
     {
         var repourls = new List<string>();
 
         using var client = new HttpClient() { BaseAddress = BaseAdress };
         client.DefaultRequestHeaders.UserAgent.Add(UserAgent);
         var creds = string.Empty;
-        if (username != string.Empty && password != string.Empty)
+        if (githubtoken != string.Empty)
         {
-            creds = $"{username}:{password}";
-            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes(creds)));
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes(githubtoken)));
         }
 
         var address = $"{entity}/repos?per_page={PerPage}";
@@ -254,7 +252,7 @@ class Program
     static string CleanName(string url)
     {
         var foldername = url.Replace("%20", "_");
-        var index = foldername.LastIndexOf("/");
+        var index = foldername.LastIndexOf('/');
         if (index >= 0)
         {
             foldername = foldername[(index + 1)..];
