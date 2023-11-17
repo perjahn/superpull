@@ -40,6 +40,8 @@ class Program
         if (parsedArgs.Length != 1 && parsedArgs.Length != 2)
         {
             Console.WriteLine("Usage: superpull [-r] <folder>");
+            // Console.WriteLine("Usage: superpull orgs/<orgname> <folder>");
+            // Console.WriteLine("Usage: superpull users/<username> <folder>");
             Console.WriteLine("Usage: superpull ghclone orgs/<orgname>");
             Console.WriteLine("Usage: superpull ghclone users/<username>");
             return 1;
@@ -214,7 +216,7 @@ class Program
                 }
                 address = GetNextLink(response.Headers);
 
-                var jsonarray = JsonSerializer.Deserialize<GithubRepository[]>(content) ?? new GithubRepository[] { };
+                var jsonarray = JsonSerializer.Deserialize<GithubRepository[]>(content) ?? [];
 
                 repourls.AddRange(jsonarray.Select(repo => repo.clone_url.EndsWith(".git") ? repo.clone_url[..^4] : repo.clone_url));
             }
@@ -227,7 +229,7 @@ class Program
             }
         }
 
-        return repourls.ToArray();
+        return [.. repourls];
     }
 
     static string GetNextLink(HttpResponseHeaders headers)
