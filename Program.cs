@@ -263,7 +263,7 @@ class Program
         var sb = new StringBuilder();
         foreach (var c in foldername.ToCharArray())
         {
-            sb.Append(char.IsLetterOrDigit(c) ? char.ToLower(c) : "_");
+            sb.Append(char.IsLetterOrDigit(c) ? char.ToLower(c) : c == '-' || c == '.' ? c : "_");
         }
         var cleanname = sb.ToString();
         while (cleanname.Contains("__"))
