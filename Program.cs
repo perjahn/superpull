@@ -25,71 +25,101 @@ class Program
 
     public static async Task<int> Main(string[] args)
     {
-        var parsedArgs = args;
+        var parsedArgs = args.ToList();
 
-        if (parsedArgs.Length == 2 && parsedArgs[0] == "ghclone")
+        Throttle = GetIntArgument(parsedArgs, "-t", Throttle);
+
+        if ((parsedArgs.Count == 2 || parsedArgs.Count == 3) && parsedArgs[0] == "ghclone" && (parsedArgs[1].StartsWith("orgs/") || parsedArgs[1].StartsWith("users/")))
         {
             var githubtoken = Environment.GetEnvironmentVariable("GITHUB_TOKEN") ?? string.Empty;
-            await SuperClone($"{parsedArgs[1]}", githubtoken);
+            await SuperClone($"{parsedArgs[1]}", githubtoken, parsedArgs.Count == 3 ? parsedArgs[2] : string.Empty);
             return 0;
         }
 
-        var recurse = parsedArgs.Contains("-r");
-        parsedArgs = parsedArgs.Where(a => a != "-r").ToArray();
+        var recurse = GetFlagArgument(parsedArgs, "-r");
 
-        if (parsedArgs.Length != 1 && parsedArgs.Length != 2)
+        if (parsedArgs.Count != 1)
         {
-            Console.WriteLine("Usage: superpull [-r] <folder>");
-            // Console.WriteLine("Usage: superpull orgs/<orgname> <folder>");
-            // Console.WriteLine("Usage: superpull users/<username> <folder>");
-            Console.WriteLine("Usage: superpull ghclone orgs/<orgname>");
-            Console.WriteLine("Usage: superpull ghclone users/<username>");
+            Console.WriteLine(
+                "Usage:\n" +
+                "superpull [-t throttle] [-r] <folder>\n" +
+                "superpull [-t throttle] ghclone orgs/<orgname> [folder]\n" +
+                "superpull [-t throttle] ghclone users/<username> [folder]");
             return 1;
         }
 
-        var rootfolder = ".";
-        if (parsedArgs.Length == 1)
-        {
-            rootfolder = parsedArgs[0];
-        }
-        SuperPull(recurse, rootfolder);
-
-        return 0;
+        return SuperPull(recurse, parsedArgs[0]) ? 0 : 1;
     }
 
-    static void SuperPull(bool recurse, string rootfolder)
+    static int GetIntArgument(List<string> args, string flagname, int defaultValue)
+    {
+        var index = args.IndexOf(flagname);
+        if (index < 0 || index > args.Count - 2)
+        {
+            return defaultValue;
+        }
+
+        var value = args[index + 1];
+        args.RemoveRange(index, 2);
+        return int.TryParse(value, out int intValue) ? intValue : defaultValue;
+    }
+
+    static bool GetFlagArgument(List<string> args, string flagname)
+    {
+        var index = args.IndexOf(flagname);
+        if (index < 0)
+        {
+            return false;
+        }
+
+        args.RemoveAt(index);
+        return true;
+    }
+
+    static bool SuperPull(bool recurse, string rootfolder)
     {
         var watch = Stopwatch.StartNew();
 
-        var folders = recurse ? Directory.GetDirectories(rootfolder, string.Empty, SearchOption.AllDirectories) : Directory.GetDirectories(rootfolder);
+        var folder = rootfolder == string.Empty ? "." : rootfolder;
+        if (!Directory.Exists(folder))
+        {
+            Console.WriteLine($"Folder not found: '{folder}'");
+            return false;
+        }
 
-        var gitfolders = folders.Where(d => Directory.Exists(Path.Combine(d, ".git"))).ToArray();
+        var folders = recurse ? Directory.GetDirectories(folder, string.Empty, SearchOption.AllDirectories) : Directory.GetDirectories(rootfolder)
+            .Select(f => f.StartsWith("./") ? f[2..] : f).ToArray();
 
-        Console.WriteLine($"Found {gitfolders.Length} repos.");
+        var repofolders = folders.Where(d => Directory.Exists(Path.Combine(d, ".git"))).ToArray();
 
-        Array.Sort(gitfolders);
+        Console.WriteLine($"Found {repofolders.Length} repos.");
+
+        Array.Sort(repofolders);
 
         var processes = new List<Process>();
         var processFolders = new List<string>();
 
-        foreach (var gitfolder in gitfolders)
+        var count = 0;
+
+        foreach (var repofolder in repofolders)
         {
+            count++;
             while (processes.Count(p => { p.Refresh(); return !p.HasExited; }) > Throttle)
             {
                 Thread.Sleep(100);
             }
 
             Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine($"Pulling {Path.GetFileName(gitfolder)}...");
+            Console.WriteLine($"Pulling ({count}/{repofolders.Length}) {Path.GetFileName(repofolder)}...");
             Console.ResetColor();
 
-            var startInfo = new ProcessStartInfo("git", "pull -r") { WorkingDirectory = gitfolder };
+            var startInfo = new ProcessStartInfo("git", "pull -r") { WorkingDirectory = repofolder };
 
             var p = Process.Start(startInfo);
             if (p != null)
             {
                 processes.Add(p);
-                processFolders.Add(gitfolder);
+                processFolders.Add(repofolder);
             }
         }
 
@@ -128,11 +158,20 @@ class Program
         }
 
         Console.WriteLine($"Done: {watch.Elapsed}");
+
+        return true;
     }
 
-    static async Task SuperClone(string entity, string githubtoken)
+    static async Task<bool> SuperClone(string entity, string githubtoken, string rootfolder)
     {
         var watch = Stopwatch.StartNew();
+
+        var folder = rootfolder == string.Empty ? "." : rootfolder;
+        if (!Directory.Exists(folder))
+        {
+            Console.WriteLine($"Folder not found: '{folder}'");
+            return false;
+        }
 
         var repourls = await GetRepoUrls(entity, githubtoken);
 
@@ -143,12 +182,16 @@ class Program
         var processes = new List<Process>();
         var processFolders = new List<string>();
 
+        var count = 0;
+
         foreach (var repourl in repourls)
         {
-            var gitfolder = CleanName(repourl);
-            if (Directory.Exists(gitfolder))
+            count++;
+            var repofolder = CleanUrl(repourl);
+            repofolder = folder != string.Empty ? Path.Combine(folder, repofolder) : repofolder;
+            if (Directory.Exists(repofolder))
             {
-                Console.WriteLine($"Folder already exists: '{gitfolder}'");
+                Console.WriteLine($"Folder already exists: '{repofolder}'");
                 continue;
             }
 
@@ -158,7 +201,7 @@ class Program
             }
 
             Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine($"Cloning: '{repourl}' -> '{gitfolder}'");
+            Console.WriteLine($"Cloning ({count}/{repourls.Length}): '{repourl}' -> '{repofolder}'");
             Console.ResetColor();
 
             var repourlWithCredentials = repourl;
@@ -173,15 +216,17 @@ class Program
                 repourlWithCredentials = $"{repourl[..(index + 3)]}{githubtoken}@{repourl[(index + 3)..]}";
             }
 
-            var p = Process.Start("git", $"clone {repourlWithCredentials} {gitfolder}");
+            var p = Process.Start("git", $"clone -- {repourlWithCredentials} {repofolder}");
             if (p != null)
             {
                 processes.Add(p);
-                processFolders.Add(gitfolder);
+                processFolders.Add(repofolder);
             }
         }
 
         Console.WriteLine($"Done: {watch.Elapsed}");
+
+        return true;
     }
 
     static async Task<string[]> GetRepoUrls(string entity, string githubtoken)
@@ -251,7 +296,7 @@ class Program
         return string.Empty;
     }
 
-    static string CleanName(string url)
+    static string CleanUrl(string url)
     {
         var foldername = url.Replace("%20", "_");
         var index = foldername.LastIndexOf('/');
