@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
@@ -31,9 +32,10 @@ class Program
 
         if ((parsedArgs.Count == 2 || parsedArgs.Count == 3) && parsedArgs[0] == "ghclone" && (parsedArgs[1].StartsWith("orgs/") || parsedArgs[1].StartsWith("users/")))
         {
+            var createsymboliclinks = GetFlagArgument(parsedArgs, "-l");
+
             var githubtoken = Environment.GetEnvironmentVariable("GITHUB_TOKEN") ?? string.Empty;
-            await SuperClone($"{parsedArgs[1]}", githubtoken, parsedArgs.Count == 3 ? parsedArgs[2] : string.Empty);
-            return 0;
+            return await SuperClone(parsedArgs[1], githubtoken, parsedArgs.Count == 3 ? parsedArgs[2] : string.Empty, createsymboliclinks) ? 0 : 1;
         }
 
         var recurse = GetFlagArgument(parsedArgs, "-r");
@@ -43,8 +45,8 @@ class Program
             Console.WriteLine(
                 "Usage:\n" +
                 "superpull [-t throttle] [-r] <folder>\n" +
-                "superpull [-t throttle] ghclone orgs/<orgname> [folder]\n" +
-                "superpull [-t throttle] ghclone users/<username> [folder]");
+                "superpull [-t throttle] ghclone [-l] orgs/<orgname> [folder]\n" +
+                "superpull [-t throttle] ghclone [-l] users/<username> [folder]");
             return 1;
         }
 
@@ -162,7 +164,7 @@ class Program
         return true;
     }
 
-    static async Task<bool> SuperClone(string entity, string githubtoken, string rootfolder)
+    static async Task<bool> SuperClone(string entity, string githubtoken, string rootfolder, bool createsymboliclinks)
     {
         var watch = Stopwatch.StartNew();
 
@@ -174,6 +176,11 @@ class Program
         }
 
         var repourls = await GetRepoUrls(entity, githubtoken);
+        if (repourls.Length == 0)
+        {
+            Console.WriteLine($"No git repos found.");
+            return false;
+        }
 
         Console.WriteLine($"Got {repourls.Length} repo urls.");
 
@@ -216,17 +223,126 @@ class Program
                 repourlWithCredentials = $"{repourl[..(index + 3)]}{githubtoken}@{repourl[(index + 3)..]}";
             }
 
-            var p = Process.Start("git", $"clone -- {repourlWithCredentials} {repofolder}");
-            if (p != null)
+            var args = $"clone -- {repourlWithCredentials} {repofolder}";
+            var p = Process.Start("git", args);
+            if (p == null)
             {
-                processes.Add(p);
-                processFolders.Add(repofolder);
+                Console.WriteLine($"Warning: Couldn't start: 'git {args}'");
+                continue;
             }
+            processes.Add(p);
+            processFolders.Add(repofolder);
+        }
+
+        var timer = Stopwatch.StartNew();
+        var nextMessage = TimeSpan.FromSeconds(10);
+        while (processes.Any(p => { p.Refresh(); return !p.HasExited; }))
+        {
+            await Task.Delay(100);
+
+            if (timer.Elapsed > nextMessage)
+            {
+                var stillRunning = new List<int>();
+                for (int i = 0; i < processes.Count; i++)
+                {
+                    processes[i].Refresh();
+                    if (!processes[i].HasExited)
+                    {
+                        stillRunning.Add(i);
+                    }
+                }
+
+                if (timer.Elapsed < TimeSpan.FromMinutes(1))
+                {
+                    Console.WriteLine($"Still running: {string.Join(", ", stillRunning.Select(i => processFolders[i]))}");
+                    nextMessage += TimeSpan.FromSeconds(10);
+                }
+                else
+                {
+                    foreach (var i in stillRunning)
+                    {
+                        Console.WriteLine($"Killing: '{processFolders[i]}'");
+                        processes[i].Kill(entireProcessTree: true);
+                    }
+                }
+            }
+        }
+
+        if (createsymboliclinks)
+        {
+            await CreateSymbolicLinks(repourls, rootfolder);
         }
 
         Console.WriteLine($"Done: {watch.Elapsed}");
 
         return true;
+    }
+
+    static async Task CreateSymbolicLinks(string[] repourls, string rootfolder)
+    {
+        var processes = new List<(Task task, Process process, string repofolder)>();
+        foreach (var repourl in repourls)
+        {
+            var repofolder = CleanUrl(repourl);
+            repofolder = rootfolder != string.Empty ? Path.Combine(rootfolder, repofolder) : repofolder;
+            if (!Directory.Exists(repofolder))
+            {
+                Console.WriteLine($"Warning: Folder not found: '{repofolder}'");
+                continue;
+            }
+
+            var startInfo = new ProcessStartInfo("git", "submodule") { WorkingDirectory = repofolder, RedirectStandardOutput = true };
+            var process = Process.Start(startInfo);
+            if (process == null)
+            {
+                Console.WriteLine($"Warning: Couldn't start: '{startInfo.FileName} {startInfo.Arguments}' in '{startInfo.WorkingDirectory}'");
+                continue;
+            }
+            processes.Add((process.WaitForExitAsync(), process, repofolder));
+        }
+
+        await Task.WhenAll(processes.Select(p => p.task));
+
+        foreach (var (task, process, repofolder) in processes)
+        {
+            var output = await process.StandardOutput.ReadToEndAsync();
+            if (output.Length == 0)
+            {
+                continue;
+            }
+            var submodules = output.Split('\n')
+                .Select(s => new { s, i = s.IndexOf(' ') })
+                .Where(s => s.i >= 0)
+                .Select(s => s.s[(s.i + 1)..])
+                .ToArray();
+
+            foreach (var submodule in submodules)
+            {
+                var submoduleFolder = Path.Combine(repofolder, submodule);
+                var target = Path.Combine("..", submodule);
+
+                var entries = new DirectoryInfo(repofolder).GetFileSystemInfos(submodule);
+                if (entries.Length == 1)
+                {
+                    if (entries[0].LinkTarget == target)
+                    {
+                        Console.WriteLine($"Existing symbolic link for submodule: '{repofolder}' '{submodule}' --> '{target}'");
+                        continue;
+                    }
+                    entries[0].Delete();
+                }
+
+                Console.WriteLine($"Creating symbolic link for submodule: '{repofolder}' '{submodule}' --> '{target}'");
+                var startInfo = new ProcessStartInfo("ln", $"-s {target} {submodule}") { WorkingDirectory = repofolder };
+                var lnprocess = Process.Start(startInfo);
+                if (lnprocess == null)
+                {
+                    Console.WriteLine($"Warning: Couldn't start: '{startInfo.FileName} {startInfo.Arguments}' in '{startInfo.WorkingDirectory}'");
+                    continue;
+                }
+                await lnprocess.WaitForExitAsync();
+            }
+        }
     }
 
     static async Task<string[]> GetRepoUrls(string entity, string githubtoken)
@@ -250,6 +366,10 @@ class Program
             try
             {
                 var response = await client.GetAsync(address);
+                if (response.StatusCode == HttpStatusCode.NotFound)
+                {
+                    return [];
+                }
                 if (!response.IsSuccessStatusCode)
                 {
                     Console.WriteLine($"Get '{address}', StatusCode: {response.StatusCode}");
