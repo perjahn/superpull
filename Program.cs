@@ -26,19 +26,18 @@ class Program
 
     public static async Task<int> Main(string[] args)
     {
-        var parsedArgs = args.ToList();
+        List<string> parsedArgs = [.. args];
 
+        var createsymboliclinks = GetFlagArgument(parsedArgs, "-l");
+        var recurse = GetFlagArgument(parsedArgs, "-r");
         Throttle = GetIntArgument(parsedArgs, "-t", Throttle);
 
-        if ((parsedArgs.Count == 2 || parsedArgs.Count == 3) && parsedArgs[0] == "ghclone" && (parsedArgs[1].StartsWith("orgs/") || parsedArgs[1].StartsWith("users/")))
+        if ((parsedArgs.Count == 2 || parsedArgs.Count == 3) &&
+            parsedArgs[0] == "ghclone" && (parsedArgs[1].StartsWith("orgs/") || parsedArgs[1].StartsWith("users/")))
         {
-            var createsymboliclinks = GetFlagArgument(parsedArgs, "-l");
-
             var githubtoken = Environment.GetEnvironmentVariable("GITHUB_TOKEN") ?? string.Empty;
             return await SuperClone(parsedArgs[1], githubtoken, parsedArgs.Count == 3 ? parsedArgs[2] : string.Empty, createsymboliclinks) ? 0 : 1;
         }
-
-        var recurse = GetFlagArgument(parsedArgs, "-r");
 
         if (parsedArgs.Count != 1)
         {
@@ -46,7 +45,15 @@ class Program
                 "Usage:\n" +
                 "superpull [-t throttle] [-r] <folder>\n" +
                 "superpull [-t throttle] ghclone [-l] orgs/<orgname> [folder]\n" +
-                "superpull [-t throttle] ghclone [-l] users/<username> [folder]");
+                "superpull [-t throttle] ghclone [-l] users/<username> [folder]\n" +
+                "\n" +
+                "ghclone: Clone all github repos, either an org or a user.\n" +
+                "-l:      Create symbolic links between repos, based on git submodules.\n" +
+                "-r:      Recurse subdirectories, looking for any .git folder to pull.\n" +
+                "-t:      Throttle parallel git pull/clone processes (default: 30).\n" +
+                "\n" +
+                "Environment variables:\n" +
+                "GITHUB_TOKEN:  Personal access token for github (only for ghclone).");
             return 1;
         }
 
@@ -89,17 +96,17 @@ class Program
             return false;
         }
 
-        var folders = recurse ? Directory.GetDirectories(folder, string.Empty, SearchOption.AllDirectories) : Directory.GetDirectories(rootfolder)
-            .Select(f => f.StartsWith("./") ? f[2..] : f).ToArray();
+        string[] folders = [.. recurse ? Directory.GetDirectories(folder, string.Empty, SearchOption.AllDirectories) : Directory.GetDirectories(rootfolder)
+            .Select(f => f.StartsWith("./") ? f[2..] : f)];
 
-        var repofolders = folders.Where(d => Directory.Exists(Path.Combine(d, ".git"))).ToArray();
+        string[] repofolders = [.. folders.Where(d => Directory.Exists(Path.Combine(d, ".git")))];
 
         Console.WriteLine($"Found {repofolders.Length} repos.");
 
         Array.Sort(repofolders);
 
-        var processes = new List<Process>();
-        var processFolders = new List<string>();
+        List<Process> processes = [];
+        List<string> processFolders = [];
 
         var count = 0;
 
@@ -115,7 +122,7 @@ class Program
             Console.WriteLine($"Pulling ({count}/{repofolders.Length}) {Path.GetFileName(repofolder)}...");
             Console.ResetColor();
 
-            var startInfo = new ProcessStartInfo("git", "pull -r") { WorkingDirectory = repofolder };
+            ProcessStartInfo startInfo = new("git", "pull -r") { WorkingDirectory = repofolder };
 
             var p = Process.Start(startInfo);
             if (p != null)
@@ -133,7 +140,7 @@ class Program
 
             if (timer.Elapsed > nextMessage)
             {
-                var stillRunning = new List<int>();
+                List<int> stillRunning = [];
                 for (int i = 0; i < processes.Count; i++)
                 {
                     processes[i].Refresh();
@@ -171,8 +178,8 @@ class Program
         var folder = rootfolder == string.Empty ? "." : rootfolder;
         if (!Directory.Exists(folder))
         {
-            Console.WriteLine($"Folder not found: '{folder}'");
-            return false;
+            Console.WriteLine($"Creating folder: '{folder}'");
+            Directory.CreateDirectory(folder);
         }
 
         var repourls = await GetRepoUrls(entity, githubtoken);
@@ -186,8 +193,8 @@ class Program
 
         Array.Sort(repourls);
 
-        var processes = new List<Process>();
-        var processFolders = new List<string>();
+        List<Process> processes = [];
+        List<string> processFolders = [];
 
         var count = 0;
 
@@ -195,7 +202,7 @@ class Program
         {
             count++;
             var repofolder = CleanUrl(repourl);
-            repofolder = folder != string.Empty ? Path.Combine(folder, repofolder) : repofolder;
+            repofolder = rootfolder != string.Empty ? Path.Combine(rootfolder, repofolder) : repofolder;
             if (Directory.Exists(repofolder))
             {
                 Console.WriteLine($"Folder already exists: '{repofolder}'");
@@ -242,7 +249,7 @@ class Program
 
             if (timer.Elapsed > nextMessage)
             {
-                var stillRunning = new List<int>();
+                List<int> stillRunning = [];
                 for (int i = 0; i < processes.Count; i++)
                 {
                     processes[i].Refresh();
@@ -280,7 +287,7 @@ class Program
 
     static async Task CreateSymbolicLinks(string[] repourls, string rootfolder)
     {
-        var processes = new List<(Task task, Process process, string repofolder)>();
+        List<(Task task, Process process, string repofolder)> processes = [];
         foreach (var repourl in repourls)
         {
             var repofolder = CleanUrl(repourl);
@@ -291,7 +298,7 @@ class Program
                 continue;
             }
 
-            var startInfo = new ProcessStartInfo("git", "submodule") { WorkingDirectory = repofolder, RedirectStandardOutput = true };
+            ProcessStartInfo startInfo = new("git", "submodule") { WorkingDirectory = repofolder, RedirectStandardOutput = true };
             var process = Process.Start(startInfo);
             if (process == null)
             {
@@ -310,11 +317,10 @@ class Program
             {
                 continue;
             }
-            var submodules = output.Split('\n')
+            string[] submodules = [.. output.Split('\n')
                 .Select(s => new { s, i = s.IndexOf(' ') })
                 .Where(s => s.i >= 0)
-                .Select(s => s.s[(s.i + 1)..])
-                .ToArray();
+                .Select(s => s.s[(s.i + 1)..])];
 
             foreach (var submodule in submodules)
             {
@@ -333,7 +339,7 @@ class Program
                 }
 
                 Console.WriteLine($"Creating symbolic link for submodule: '{repofolder}' '{submodule}' --> '{target}'");
-                var startInfo = new ProcessStartInfo("ln", $"-s {target} {submodule}") { WorkingDirectory = repofolder };
+                ProcessStartInfo startInfo = new("ln", $"-s {target} {submodule}") { WorkingDirectory = repofolder };
                 var lnprocess = Process.Start(startInfo);
                 if (lnprocess == null)
                 {
@@ -347,11 +353,10 @@ class Program
 
     static async Task<string[]> GetRepoUrls(string entity, string githubtoken)
     {
-        var repourls = new List<string>();
+        List<string> repourls = [];
 
-        using var client = new HttpClient() { BaseAddress = BaseAdress };
+        using HttpClient client = new() { BaseAddress = BaseAdress };
         client.DefaultRequestHeaders.UserAgent.Add(UserAgent);
-        var creds = string.Empty;
         if (githubtoken != string.Empty)
         {
             client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes(githubtoken)));
@@ -401,7 +406,7 @@ class Program
     {
         if (headers.Contains("Link"))
         {
-            var links = headers.GetValues("Link").SelectMany(l => l.Split(',')).ToArray();
+            string[] links = [.. headers.GetValues("Link").SelectMany(l => l.Split(','))];
             foreach (var link in links)
             {
                 var parts = link.Split(';');
@@ -425,7 +430,7 @@ class Program
             foldername = foldername[(index + 1)..];
         }
 
-        var sb = new StringBuilder();
+        StringBuilder sb = new();
         foreach (var c in foldername.ToCharArray())
         {
             sb.Append(char.IsLetterOrDigit(c) ? char.ToLower(c) : c == '-' || c == '.' ? c : "_");
