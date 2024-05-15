@@ -22,15 +22,17 @@ class Program
     static Uri BaseAdress { get; set; } = new("https://api.github.com");
     static ProductInfoHeaderValue UserAgent { get; set; } = new("useragent", "1.0");
     static int PerPage { get; set; } = 100;
-    static int Throttle { get; set; } = 30;
+    static int Throttle { get; set; } = 10;
+    static int Timeout { get; set; } = 60;
 
     public static async Task<int> Main(string[] args)
     {
         List<string> parsedArgs = [.. args];
 
         var createsymboliclinks = GetFlagArgument(parsedArgs, "-l");
+        Throttle = GetIntArgument(parsedArgs, "-p", Throttle);
         var recurse = GetFlagArgument(parsedArgs, "-r");
-        Throttle = GetIntArgument(parsedArgs, "-t", Throttle);
+        Timeout = GetIntArgument(parsedArgs, "-t", Timeout);
 
         if ((parsedArgs.Count == 2 || parsedArgs.Count == 3) &&
             parsedArgs[0] == "ghclone" && (parsedArgs[1].StartsWith("orgs/") || parsedArgs[1].StartsWith("users/")))
@@ -43,14 +45,15 @@ class Program
         {
             Console.WriteLine(
                 "Usage:\n" +
-                "superpull [-t throttle] [-r] <folder>\n" +
-                "superpull [-t throttle] ghclone [-l] orgs/<orgname> [folder]\n" +
-                "superpull [-t throttle] ghclone [-l] users/<username> [folder]\n" +
+                "superpull [-p throttle] [-t timeout] [-r] <folder>\n" +
+                "superpull [-p throttle] [-t timeout] ghclone [-l] orgs/<orgname> [folder]\n" +
+                "superpull [-p throttle] [-t timeout] ghclone [-l] users/<username> [folder]\n" +
                 "\n" +
                 "ghclone: Clone all github repos, either an org or a user.\n" +
                 "-l:      Create symbolic links between repos, based on git submodules.\n" +
+                "-p:      Throttle parallel git pull/clone processes (default: 10).\n" +
                 "-r:      Recurse subdirectories, looking for any .git folder to pull.\n" +
-                "-t:      Throttle parallel git pull/clone processes (default: 30).\n" +
+                "-t:      Timeout, in seconds (default: 60s).\n" +
                 "\n" +
                 "Environment variables:\n" +
                 "GITHUB_TOKEN:  Personal access token for github (only for ghclone).");
@@ -141,7 +144,7 @@ class Program
             if (timer.Elapsed > nextMessage)
             {
                 List<int> stillRunning = [];
-                for (int i = 0; i < processes.Count; i++)
+                for (var i = 0; i < processes.Count; i++)
                 {
                     processes[i].Refresh();
                     if (!processes[i].HasExited)
@@ -150,7 +153,7 @@ class Program
                     }
                 }
 
-                if (timer.Elapsed < TimeSpan.FromMinutes(1))
+                if (timer.Elapsed < TimeSpan.FromSeconds(Timeout))
                 {
                     Console.WriteLine($"Still running: {string.Join(", ", stillRunning.Select(i => processFolders[i]))}");
                     nextMessage += TimeSpan.FromSeconds(10);
@@ -250,7 +253,7 @@ class Program
             if (timer.Elapsed > nextMessage)
             {
                 List<int> stillRunning = [];
-                for (int i = 0; i < processes.Count; i++)
+                for (var i = 0; i < processes.Count; i++)
                 {
                     processes[i].Refresh();
                     if (!processes[i].HasExited)
@@ -259,7 +262,7 @@ class Program
                     }
                 }
 
-                if (timer.Elapsed < TimeSpan.FromMinutes(1))
+                if (timer.Elapsed < TimeSpan.FromSeconds(Timeout))
                 {
                     Console.WriteLine($"Still running: {string.Join(", ", stillRunning.Select(i => processFolders[i]))}");
                     nextMessage += TimeSpan.FromSeconds(10);
@@ -339,14 +342,7 @@ class Program
                 }
 
                 Console.WriteLine($"Creating symbolic link for submodule: '{repofolder}' '{submodule}' --> '{target}'");
-                ProcessStartInfo startInfo = new("ln", $"-s {target} {submodule}") { WorkingDirectory = repofolder };
-                var lnprocess = Process.Start(startInfo);
-                if (lnprocess == null)
-                {
-                    Console.WriteLine($"Warning: Couldn't start: '{startInfo.FileName} {startInfo.Arguments}' in '{startInfo.WorkingDirectory}'");
-                    continue;
-                }
-                await lnprocess.WaitForExitAsync();
+                Directory.CreateSymbolicLink(submodule, target);
             }
         }
     }
