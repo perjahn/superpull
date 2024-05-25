@@ -31,6 +31,7 @@ class Program
 
         var createsymboliclinks = GetFlagArgument(parsedArgs, "-l");
         Throttle = GetIntArgument(parsedArgs, "-p", Throttle);
+        var teams = GetArrayArgument(parsedArgs, "-m");
         var recurse = GetFlagArgument(parsedArgs, "-r");
         Timeout = GetIntArgument(parsedArgs, "-t", Timeout);
 
@@ -38,7 +39,7 @@ class Program
             parsedArgs[0] == "ghclone" && (parsedArgs[1].StartsWith("orgs/") || parsedArgs[1].StartsWith("users/")))
         {
             var githubtoken = Environment.GetEnvironmentVariable("GITHUB_TOKEN") ?? string.Empty;
-            return await SuperClone(parsedArgs[1], githubtoken, parsedArgs.Count == 3 ? parsedArgs[2] : string.Empty, createsymboliclinks) ? 0 : 1;
+            return await SuperClone(parsedArgs[1], githubtoken, parsedArgs.Count == 3 ? parsedArgs[2] : string.Empty, teams, createsymboliclinks) ? 0 : 1;
         }
 
         if (parsedArgs.Count != 1)
@@ -46,11 +47,12 @@ class Program
             Console.WriteLine(
                 "Usage:\n" +
                 "superpull [-p throttle] [-t timeout] [-r] <folder>\n" +
-                "superpull [-p throttle] [-t timeout] ghclone [-l] orgs/<orgname> [folder]\n" +
-                "superpull [-p throttle] [-t timeout] ghclone [-l] users/<username> [folder]\n" +
+                "superpull [-p throttle] [-t timeout] ghclone [-l] [-m team1,team2,...] orgs/<orgname> [folder]\n" +
+                "superpull [-p throttle] [-t timeout] ghclone [-l] [-m team1,team2,...] users/<username> [folder]\n" +
                 "\n" +
                 "ghclone: Clone all github repos, either an org or a user.\n" +
                 "-l:      Create symbolic links between repos, based on git submodules.\n" +
+                "-m:      Get repos for specific teams, comma separated list of team names.\n" +
                 "-p:      Throttle parallel git pull/clone processes (default: 10).\n" +
                 "-r:      Recurse subdirectories, looking for any .git folder to pull.\n" +
                 "-t:      Timeout, in seconds (default: 60s).\n" +
@@ -88,6 +90,19 @@ class Program
         return true;
     }
 
+    static string[] GetArrayArgument(List<string> args, string flagname)
+    {
+        var index = args.IndexOf(flagname);
+        if (index < 0 || index > args.Count - 2)
+        {
+            return [];
+        }
+
+        var value = args[index + 1];
+        args.RemoveRange(index, 2);
+        return value.Split(',');
+    }
+
     static bool SuperPull(bool recurse, string rootfolder)
     {
         var watch = Stopwatch.StartNew();
@@ -116,7 +131,7 @@ class Program
         foreach (var repofolder in repofolders)
         {
             count++;
-            while (processes.Count(p => { p.Refresh(); return !p.HasExited; }) > Throttle)
+            while (processes.Count(p => { p.Refresh(); return !p.HasExited; }) >= Throttle)
             {
                 Thread.Sleep(100);
             }
@@ -174,7 +189,7 @@ class Program
         return true;
     }
 
-    static async Task<bool> SuperClone(string entity, string githubtoken, string rootfolder, bool createsymboliclinks)
+    static async Task<bool> SuperClone(string entity, string githubtoken, string rootfolder, string[] teams, bool createsymboliclinks)
     {
         var watch = Stopwatch.StartNew();
 
@@ -185,11 +200,19 @@ class Program
             Directory.CreateDirectory(folder);
         }
 
-        var repourls = await GetRepoUrls(entity, githubtoken);
-        if (repourls.Length == 0)
+        string[] repourls;
+        if (teams.Length > 0)
         {
-            Console.WriteLine($"No git repos found.");
-            return false;
+            repourls = await GetRepoUrlsTeams(entity, githubtoken, teams);
+        }
+        else
+        {
+            repourls = await GetRepoUrls(entity, githubtoken);
+            if (repourls.Length == 0)
+            {
+                Console.WriteLine($"No git repos found.");
+                return false;
+            }
         }
 
         Console.WriteLine($"Got {repourls.Length} repo urls.");
@@ -212,7 +235,7 @@ class Program
                 continue;
             }
 
-            while (processes.Count(p => { p.Refresh(); return !p.HasExited; }) > Throttle)
+            while (processes.Count(p => { p.Refresh(); return !p.HasExited; }) >= Throttle)
             {
                 await Task.Delay(100);
             }
@@ -395,7 +418,61 @@ class Program
             }
         }
 
-        return [.. repourls];
+        return [.. repourls.Distinct()];
+    }
+
+    static async Task<string[]> GetRepoUrlsTeams(string entity, string githubtoken, string[] teams)
+    {
+        List<string> repourls = [];
+
+        using HttpClient client = new() { BaseAddress = BaseAdress };
+        client.DefaultRequestHeaders.UserAgent.Add(UserAgent);
+        if (githubtoken != string.Empty)
+        {
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes(githubtoken)));
+        }
+
+        foreach (var teamname in teams)
+        {
+            var address = $"{entity}/teams/{teamname}/repos?per_page={PerPage}";
+            while (address != string.Empty)
+            {
+                Console.WriteLine($"Getting repos: '{address}'");
+
+                var content = string.Empty;
+                try
+                {
+                    var response = await client.GetAsync(address);
+                    if (response.StatusCode == HttpStatusCode.NotFound)
+                    {
+                        return [];
+                    }
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        Console.WriteLine($"Get '{address}', StatusCode: {response.StatusCode}");
+                    }
+                    content = await response.Content.ReadAsStringAsync();
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        Console.WriteLine($"Result: >>>{content}<<<");
+                    }
+                    address = GetNextLink(response.Headers);
+
+                    var jsonarray = JsonSerializer.Deserialize<GithubRepository[]>(content) ?? [];
+
+                    repourls.AddRange(jsonarray.Select(repo => repo.clone_url.EndsWith(".git") ? repo.clone_url[..^4] : repo.clone_url));
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Get '{address}'");
+                    Console.WriteLine($"Result: >>>{content}<<<");
+                    Console.WriteLine($"Exception: >>>{ex}<<<");
+                    continue;
+                }
+            }
+        }
+
+        return [.. repourls.Distinct()];
     }
 
     static string GetNextLink(HttpResponseHeaders headers)
@@ -427,7 +504,7 @@ class Program
         }
 
         StringBuilder sb = new();
-        foreach (var c in foldername.ToCharArray())
+        foreach (var c in foldername)
         {
             sb.Append(char.IsLetterOrDigit(c) ? char.ToLower(c) : c == '-' || c == '.' ? c : "_");
         }
