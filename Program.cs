@@ -8,6 +8,7 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -24,37 +25,42 @@ class Program
     static int PerPage { get; set; } = 100;
     static int Throttle { get; set; } = 10;
     static int Timeout { get; set; } = 60;
+    static bool UseBearerToken { get; set; }
 
     public static async Task<int> Main(string[] args)
     {
         List<string> parsedArgs = [.. args];
 
-        var createsymboliclinks = GetFlagArgument(parsedArgs, "-l");
-        Throttle = GetIntArgument(parsedArgs, "-p", Throttle);
-        var teams = GetArrayArgument(parsedArgs, "-m");
-        var recurse = GetFlagArgument(parsedArgs, "-r");
-        Timeout = GetIntArgument(parsedArgs, "-t", Timeout);
+        UseBearerToken = ExtractFlagArgument(parsedArgs, "-b");
+        var createsymboliclinks = ExtractFlagArgument(parsedArgs, "-l");
+        Throttle = ExtractIntArgument(parsedArgs, "-p", Throttle);
+        var teams = ExtractArrayArguments(parsedArgs, "-m");
+        var reponamepatterns = ExtractArrayArguments(parsedArgs, "-n");
+        var recurse = ExtractFlagArgument(parsedArgs, "-r");
+        Timeout = ExtractIntArgument(parsedArgs, "-t", Timeout);
 
         if ((parsedArgs.Count == 2 || parsedArgs.Count == 3) &&
             parsedArgs[0] == "ghclone" && (parsedArgs[1].StartsWith("orgs/") || parsedArgs[1].StartsWith("users/")))
         {
             var githubtoken = Environment.GetEnvironmentVariable("GITHUB_TOKEN") ?? string.Empty;
-            return await SuperClone(parsedArgs[1], githubtoken, parsedArgs.Count == 3 ? parsedArgs[2] : string.Empty, teams, createsymboliclinks) ? 0 : 1;
+            return await SuperClone(parsedArgs[1], githubtoken, parsedArgs.Count == 3 ? parsedArgs[2] : string.Empty, teams, reponamepatterns, createsymboliclinks) ? 0 : 1;
         }
 
         if (parsedArgs.Count != 1)
         {
             Console.WriteLine(
                 "Usage:\n" +
-                "superpull [-p throttle] [-t timeout] [-r] <folder>\n" +
-                "superpull [-p throttle] [-t timeout] ghclone [-l] [-m team1,team2,...] orgs/<orgname> [folder]\n" +
-                "superpull [-p throttle] [-t timeout] ghclone [-l] [-m team1,team2,...] users/<username> [folder]\n" +
+                "superpull [-b] [-p throttle] [-t timeout] [-r] <folder>\n" +
+                "superpull [-b] [-p throttle] [-t timeout] ghclone [-l] [-m team] [-n regex] orgs/<orgname> [folder]\n" +
+                "superpull [-b] [-p throttle] [-t timeout] ghclone [-l] [-m team] [-n regex] users/<username> [folder]\n" +
                 "\n" +
-                "ghclone: Clone all github repos, either an org or a user.\n" +
+                "ghclone: Clone all github repos, either from an org or a user.\n" +
+                "-b:      Use bearer token.\n" +
                 "-l:      Create symbolic links between repos, based on git submodules.\n" +
-                "-m:      Get repos for specific teams, comma separated list of team names.\n" +
+                "-m:      Filter repos for specific team. Can be specified multiple times.\n" +
+                "-n:      Filter repos for specific name, using regex. Can be specified multiple times.\n" +
                 "-p:      Throttle parallel git pull/clone processes (default: 10).\n" +
-                "-r:      Recurse subdirectories, looking for any .git folder to pull.\n" +
+                "-r:      Recurse subfolders, looking for any .git folder to pull.\n" +
                 "-t:      Timeout, in seconds (default: 60s).\n" +
                 "\n" +
                 "Environment variables:\n" +
@@ -65,7 +71,7 @@ class Program
         return SuperPull(recurse, parsedArgs[0]) ? 0 : 1;
     }
 
-    static int GetIntArgument(List<string> args, string flagname, int defaultValue)
+    static int ExtractIntArgument(List<string> args, string flagname, int defaultValue)
     {
         var index = args.IndexOf(flagname);
         if (index < 0 || index > args.Count - 2)
@@ -78,7 +84,7 @@ class Program
         return int.TryParse(value, out int intValue) ? intValue : defaultValue;
     }
 
-    static bool GetFlagArgument(List<string> args, string flagname)
+    static bool ExtractFlagArgument(List<string> args, string flagname)
     {
         var index = args.IndexOf(flagname);
         if (index < 0)
@@ -90,17 +96,18 @@ class Program
         return true;
     }
 
-    static string[] GetArrayArgument(List<string> args, string flagname)
+    static string[] ExtractArrayArguments(List<string> args, string flagname)
     {
-        var index = args.IndexOf(flagname);
-        if (index < 0 || index > args.Count - 2)
+        List<string> values = [];
+
+        int index;
+        while ((index = args.IndexOf(flagname)) >= 0 && index < args.Count - 1)
         {
-            return [];
+            values.Add(args[index + 1]);
+            args.RemoveRange(index, 2);
         }
 
-        var value = args[index + 1];
-        args.RemoveRange(index, 2);
-        return value.Split(',');
+        return [.. values];
     }
 
     static bool SuperPull(bool recurse, string rootfolder)
@@ -184,12 +191,14 @@ class Program
             }
         }
 
+        Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine($"Done: {watch.Elapsed}");
+        Console.ResetColor();
 
         return true;
     }
 
-    static async Task<bool> SuperClone(string entity, string githubtoken, string rootfolder, string[] teams, bool createsymboliclinks)
+    static async Task<bool> SuperClone(string entity, string githubtoken, string rootfolder, string[] teams, string[] reponamepatterns, bool createsymboliclinks)
     {
         var watch = Stopwatch.StartNew();
 
@@ -197,25 +206,32 @@ class Program
         if (!Directory.Exists(folder))
         {
             Console.WriteLine($"Creating folder: '{folder}'");
-            Directory.CreateDirectory(folder);
+            _ = Directory.CreateDirectory(folder);
         }
 
-        string[] repourls;
-        if (teams.Length > 0)
+        var repos = await GetRepoUrls(entity, githubtoken, reponamepatterns, teams);
+        var repourls = repos.repourls;
+        if (repourls.Length == 0)
         {
-            repourls = await GetRepoUrlsTeams(entity, githubtoken, teams);
+            if (githubtoken == string.Empty)
+            {
+                Console.WriteLine($"No git repos found. GITHIB_TOKEN environment variable isn't set, for access to private repos it must be set.");
+            }
+            else
+            {
+                Console.WriteLine($"No git repos found.");
+            }
+            return false;
+        }
+
+        if (reponamepatterns.Length > 0 || repourls.Length != repos.totalrepos)
+        {
+            Console.WriteLine($"Found {repos.totalrepos} repo urls, filtered to {repourls.Length}.");
         }
         else
         {
-            repourls = await GetRepoUrls(entity, githubtoken);
-            if (repourls.Length == 0)
-            {
-                Console.WriteLine($"No git repos found.");
-                return false;
-            }
+            Console.WriteLine($"Got {repourls.Length} repos.");
         }
-
-        Console.WriteLine($"Got {repourls.Length} repo urls.");
 
         Array.Sort(repourls);
 
@@ -306,7 +322,9 @@ class Program
             await CreateSymbolicLinks(repourls, rootfolder);
         }
 
+        Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine($"Done: {watch.Elapsed}");
+        Console.ResetColor();
 
         return true;
     }
@@ -365,114 +383,106 @@ class Program
                 }
 
                 Console.WriteLine($"Creating symbolic link for submodule: '{repofolder}' '{submodule}' --> '{target}'");
-                Directory.CreateSymbolicLink(submodule, target);
+                _ = Directory.CreateSymbolicLink(submodule, target);
             }
         }
     }
 
-    static async Task<string[]> GetRepoUrls(string entity, string githubtoken)
+    static async Task<(string[] repourls, int totalrepos)> GetRepoUrls(string entity, string githubtoken, string[] reponamepatterns, string[] teams)
     {
-        List<string> repourls = [];
+        List<GithubRepository> repos = [];
+
+        if (teams.Length > 0)
+        {
+            foreach (var teamname in teams)
+            {
+                var address = $"{entity}/teams/{teamname}/repos?per_page={PerPage}";
+                repos.AddRange(await GetRepos(address, githubtoken));
+            }
+        }
+        else
+        {
+            var address = $"{entity}/repos?per_page={PerPage}";
+            repos = await GetRepos(address, githubtoken);
+        }
+
+        repos = [.. repos.GroupBy(r => r.name).Select(g => g.First())];
+
+        var totalrepos = repos.Count;
+
+        Regex[] regexes = [.. reponamepatterns.Select(p => new Regex(p))];
+        string[] repourls = [.. (reponamepatterns.Length > 0 ? repos.Where(r => regexes.Any(re => re.IsMatch(r.name))) : repos).Select(r => r.clone_url)];
+
+        for (var i = 0; i < repourls.Length; i++)
+        {
+            repourls[i] = repourls[i].EndsWith(".git") ? repourls[i][..^4] : repourls[i];
+        }
+
+        return ([.. repourls], totalrepos);
+    }
+
+    static async Task<List<GithubRepository>> GetRepos(string address, string githubtoken)
+    {
+        List<GithubRepository> repos = [];
 
         using HttpClient client = new() { BaseAddress = BaseAdress };
         client.DefaultRequestHeaders.UserAgent.Add(UserAgent);
         if (githubtoken != string.Empty)
         {
-            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes(githubtoken)));
+            client.DefaultRequestHeaders.Authorization = UseBearerToken
+                ? new AuthenticationHeaderValue("Bearer", githubtoken)
+                : new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes(githubtoken)));
         }
 
-        var address = $"{entity}/repos?per_page={PerPage}";
         while (address != string.Empty)
         {
             Console.WriteLine($"Getting repos: '{address}'");
 
             var content = string.Empty;
+            HttpResponseMessage response;
             try
             {
-                var response = await client.GetAsync(address);
-                if (response.StatusCode == HttpStatusCode.NotFound)
-                {
-                    return [];
-                }
-                if (!response.IsSuccessStatusCode)
-                {
-                    Console.WriteLine($"Get '{address}', StatusCode: {response.StatusCode}");
-                }
-                content = await response.Content.ReadAsStringAsync();
-                if (!response.IsSuccessStatusCode)
-                {
-                    Console.WriteLine($"Result: >>>{content}<<<");
-                }
-                address = GetNextLink(response.Headers);
-
-                var jsonarray = JsonSerializer.Deserialize<GithubRepository[]>(content) ?? [];
-
-                repourls.AddRange(jsonarray.Select(repo => repo.clone_url.EndsWith(".git") ? repo.clone_url[..^4] : repo.clone_url));
+                response = await client.GetAsync(new Uri(address));
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
             {
                 Console.WriteLine($"Get '{address}'");
                 Console.WriteLine($"Result: >>>{content}<<<");
                 Console.WriteLine($"Exception: >>>{ex}<<<");
                 continue;
             }
-        }
-
-        return [.. repourls.Distinct()];
-    }
-
-    static async Task<string[]> GetRepoUrlsTeams(string entity, string githubtoken, string[] teams)
-    {
-        List<string> repourls = [];
-
-        using HttpClient client = new() { BaseAddress = BaseAdress };
-        client.DefaultRequestHeaders.UserAgent.Add(UserAgent);
-        if (githubtoken != string.Empty)
-        {
-            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes(githubtoken)));
-        }
-
-        foreach (var teamname in teams)
-        {
-            var address = $"{entity}/teams/{teamname}/repos?per_page={PerPage}";
-            while (address != string.Empty)
+            if (response.StatusCode == HttpStatusCode.NotFound)
             {
-                Console.WriteLine($"Getting repos: '{address}'");
-
-                var content = string.Empty;
-                try
-                {
-                    var response = await client.GetAsync(address);
-                    if (response.StatusCode == HttpStatusCode.NotFound)
-                    {
-                        return [];
-                    }
-                    if (!response.IsSuccessStatusCode)
-                    {
-                        Console.WriteLine($"Get '{address}', StatusCode: {response.StatusCode}");
-                    }
-                    content = await response.Content.ReadAsStringAsync();
-                    if (!response.IsSuccessStatusCode)
-                    {
-                        Console.WriteLine($"Result: >>>{content}<<<");
-                    }
-                    address = GetNextLink(response.Headers);
-
-                    var jsonarray = JsonSerializer.Deserialize<GithubRepository[]>(content) ?? [];
-
-                    repourls.AddRange(jsonarray.Select(repo => repo.clone_url.EndsWith(".git") ? repo.clone_url[..^4] : repo.clone_url));
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"Get '{address}'");
-                    Console.WriteLine($"Result: >>>{content}<<<");
-                    Console.WriteLine($"Exception: >>>{ex}<<<");
-                    continue;
-                }
+                return [];
             }
+            if (!response.IsSuccessStatusCode)
+            {
+                Console.WriteLine($"Get '{address}', StatusCode: {response.StatusCode}");
+            }
+            content = await response.Content.ReadAsStringAsync();
+            if (!response.IsSuccessStatusCode)
+            {
+                Console.WriteLine($"Result: >>>{content}<<<");
+            }
+            address = GetNextLink(response.Headers);
+
+            GithubRepository[] jsonarray;
+            try
+            {
+                jsonarray = JsonSerializer.Deserialize<GithubRepository[]>(content) ?? [];
+            }
+            catch (JsonException ex)
+            {
+                Console.WriteLine($"Get '{address}'");
+                Console.WriteLine($"Result: >>>{content}<<<");
+                Console.WriteLine($"Exception: >>>{ex}<<<");
+                continue;
+            }
+
+            repos.AddRange(jsonarray);
         }
 
-        return [.. repourls.Distinct()];
+        return repos;
     }
 
     static string GetNextLink(HttpResponseHeaders headers)
@@ -506,7 +516,7 @@ class Program
         StringBuilder sb = new();
         foreach (var c in foldername)
         {
-            sb.Append(char.IsLetterOrDigit(c) ? char.ToLower(c) : c == '-' || c == '.' ? c : "_");
+            _ = sb.Append(char.IsLetterOrDigit(c) ? char.ToLower(c) : c is '-' or '.' ? c : "_");
         }
         var cleanname = sb.ToString();
         while (cleanname.Contains("__"))

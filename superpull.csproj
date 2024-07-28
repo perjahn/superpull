@@ -7,6 +7,6 @@
     <AnalysisMode>All</AnalysisMode>
     <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
     <AnalysisLevelStyle>preview</AnalysisLevelStyle>
-    <NoWarn>CA1031,CA1050,CA1056,CA1303,CA1304,CA1307,CA1310,CA1707,CA1820,CA1825,CA1852,CA2007,CA2234,IDE0005,IDE0008,IDE0040,IDE0058,IDE0078,IDE1006</NoWarn>
+    <NoWarn>CA1050,CA1056,CA1303,CA1304,CA1307,CA1310,CA1707,CA1820,CA1852,CA2007,IDE0008,IDE0040,IDE1006</NoWarn>
   </PropertyGroup>
 </Project>
