@@ -22,3 +22,5 @@ jobs:
         dotnet-version: 8.0.x
     - name: Build
       run: ./build.sh
+    - name: Update Release
+      run: ./update_release.sh "${{ secrets.GITHUB_TOKEN }}"
