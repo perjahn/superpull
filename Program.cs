@@ -25,13 +25,12 @@ class Program
     static int PerPage { get; set; } = 100;
     static int Throttle { get; set; } = 10;
     static int Timeout { get; set; } = 60;
-    static bool UseBearerToken { get; set; }
 
     public static async Task<int> Main(string[] args)
     {
         List<string> parsedArgs = [.. args];
 
-        UseBearerToken = ExtractFlagArgument(parsedArgs, "-b");
+        var usebearer = ExtractFlagArgument(parsedArgs, "-b");
         var createsymboliclinks = ExtractFlagArgument(parsedArgs, "-l");
         Throttle = ExtractIntArgument(parsedArgs, "-p", Throttle);
         var teams = ExtractArrayArguments(parsedArgs, "-m");
@@ -43,7 +42,7 @@ class Program
             parsedArgs[0] == "ghclone" && (parsedArgs[1].StartsWith("orgs/") || parsedArgs[1].StartsWith("users/")))
         {
             var githubtoken = Environment.GetEnvironmentVariable("GITHUB_TOKEN") ?? string.Empty;
-            return await SuperClone(parsedArgs[1], githubtoken, parsedArgs.Count == 3 ? parsedArgs[2] : string.Empty, teams, reponamepatterns, createsymboliclinks) ? 0 : 1;
+            return await SuperClone(parsedArgs[1], githubtoken, usebearer, parsedArgs.Count == 3 ? parsedArgs[2] : string.Empty, teams, reponamepatterns, createsymboliclinks) ? 0 : 1;
         }
 
         if (parsedArgs.Count != 1)
@@ -55,7 +54,7 @@ class Program
                 "superpull [-b] [-p throttle] [-t timeout] ghclone [-l] [-m team] [-n regex] users/<username> [folder]\n" +
                 "\n" +
                 "ghclone: Clone all github repos, either from an org or a user.\n" +
-                "-b:      Use bearer token.\n" +
+                "-b:      Use bearer token auth, instead of basic auth.\n" +
                 "-l:      Create symbolic links between repos, based on git submodules.\n" +
                 "-m:      Filter repos for specific team. Can be specified multiple times.\n" +
                 "-n:      Filter repos for specific name, using regex. Can be specified multiple times.\n" +
@@ -198,7 +197,7 @@ class Program
         return true;
     }
 
-    static async Task<bool> SuperClone(string entity, string githubtoken, string rootfolder, string[] teams, string[] reponamepatterns, bool createsymboliclinks)
+    static async Task<bool> SuperClone(string entity, string githubtoken, bool usebearer, string rootfolder, string[] teams, string[] reponamepatterns, bool createsymboliclinks)
     {
         var watch = Stopwatch.StartNew();
 
@@ -209,7 +208,7 @@ class Program
             _ = Directory.CreateDirectory(folder);
         }
 
-        var repos = await GetRepoUrls(entity, githubtoken, reponamepatterns, teams);
+        var repos = await GetRepoUrls(entity, githubtoken, usebearer, reponamepatterns, teams);
         var repourls = repos.repourls;
         if (repourls.Length == 0)
         {
@@ -388,7 +387,7 @@ class Program
         }
     }
 
-    static async Task<(string[] repourls, int totalrepos)> GetRepoUrls(string entity, string githubtoken, string[] reponamepatterns, string[] teams)
+    static async Task<(string[] repourls, int totalrepos)> GetRepoUrls(string entity, string githubtoken, bool usebearer, string[] reponamepatterns, string[] teams)
     {
         List<GithubRepository> repos = [];
 
@@ -397,13 +396,13 @@ class Program
             foreach (var teamname in teams)
             {
                 var address = $"{entity}/teams/{teamname}/repos?per_page={PerPage}";
-                repos.AddRange(await GetRepos(address, githubtoken));
+                repos.AddRange(await GetRepos(address, githubtoken, usebearer));
             }
         }
         else
         {
             var address = $"{entity}/repos?per_page={PerPage}";
-            repos = await GetRepos(address, githubtoken);
+            repos = await GetRepos(address, githubtoken, usebearer);
         }
 
         repos = [.. repos.GroupBy(r => r.name).Select(g => g.First())];
@@ -421,7 +420,7 @@ class Program
         return ([.. repourls], totalrepos);
     }
 
-    static async Task<List<GithubRepository>> GetRepos(string address, string githubtoken)
+    static async Task<List<GithubRepository>> GetRepos(string address, string githubtoken, bool usebearer)
     {
         List<GithubRepository> repos = [];
 
@@ -429,9 +428,9 @@ class Program
         client.DefaultRequestHeaders.UserAgent.Add(UserAgent);
         if (githubtoken != string.Empty)
         {
-            client.DefaultRequestHeaders.Authorization = UseBearerToken
-                ? new AuthenticationHeaderValue("Bearer", githubtoken)
-                : new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes(githubtoken)));
+            client.DefaultRequestHeaders.Authorization = usebearer ?
+                new("Bearer", githubtoken) :
+                new("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes(githubtoken)));
         }
 
         while (address != string.Empty)
@@ -439,10 +438,24 @@ class Program
             Console.WriteLine($"Getting repos: '{address}'");
 
             var content = string.Empty;
-            HttpResponseMessage response;
             try
             {
-                response = await client.GetAsync(new Uri(address));
+                using HttpResponseMessage response = await client.GetAsync(new Uri(address));
+
+                if (response.StatusCode == HttpStatusCode.NotFound)
+                {
+                    return [];
+                }
+                if (!response.IsSuccessStatusCode)
+                {
+                    Console.WriteLine($"Get '{address}', StatusCode: {response.StatusCode}");
+                }
+                content = await response.Content.ReadAsStringAsync();
+                if (!response.IsSuccessStatusCode)
+                {
+                    Console.WriteLine($"Result: >>>{content}<<<");
+                }
+                address = GetNextLink(response.Headers);
             }
             catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
             {
@@ -451,21 +464,6 @@ class Program
                 Console.WriteLine($"Exception: >>>{ex}<<<");
                 continue;
             }
-            if (response.StatusCode == HttpStatusCode.NotFound)
-            {
-                return [];
-            }
-            if (!response.IsSuccessStatusCode)
-            {
-                Console.WriteLine($"Get '{address}', StatusCode: {response.StatusCode}");
-            }
-            content = await response.Content.ReadAsStringAsync();
-            if (!response.IsSuccessStatusCode)
-            {
-                Console.WriteLine($"Result: >>>{content}<<<");
-            }
-            address = GetNextLink(response.Headers);
-
             GithubRepository[] jsonarray;
             try
             {
