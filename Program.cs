@@ -438,10 +438,24 @@ class Program
             Console.WriteLine($"Getting repos: '{address}'");
 
             var content = string.Empty;
-            HttpResponseMessage response;
             try
             {
-                response = await client.GetAsync(new Uri(address));
+                using HttpResponseMessage response = await client.GetAsync(new Uri(address));
+
+                if (response.StatusCode == HttpStatusCode.NotFound)
+                {
+                    return [];
+                }
+                if (!response.IsSuccessStatusCode)
+                {
+                    Console.WriteLine($"Get '{address}', StatusCode: {response.StatusCode}");
+                }
+                content = await response.Content.ReadAsStringAsync();
+                if (!response.IsSuccessStatusCode)
+                {
+                    Console.WriteLine($"Result: >>>{content}<<<");
+                }
+                address = GetNextLink(response.Headers);
             }
             catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
             {
@@ -450,21 +464,6 @@ class Program
                 Console.WriteLine($"Exception: >>>{ex}<<<");
                 continue;
             }
-            if (response.StatusCode == HttpStatusCode.NotFound)
-            {
-                return [];
-            }
-            if (!response.IsSuccessStatusCode)
-            {
-                Console.WriteLine($"Get '{address}', StatusCode: {response.StatusCode}");
-            }
-            content = await response.Content.ReadAsStringAsync();
-            if (!response.IsSuccessStatusCode)
-            {
-                Console.WriteLine($"Result: >>>{content}<<<");
-            }
-            address = GetNextLink(response.Headers);
-
             GithubRepository[] jsonarray;
             try
             {
