@@ -16,6 +16,7 @@ public class GithubRepository
 {
     public string name { get; set; } = string.Empty;
     public string clone_url { get; set; } = string.Empty;
+    public int size { get; set; }
 }
 
 class Program
@@ -31,10 +32,12 @@ class Program
         List<string> parsedArgs = [.. args];
 
         var usebearer = ExtractFlagArgument(parsedArgs, "-b");
+        var teams = ExtractArrayArguments(parsedArgs, "-e");
         var createsymboliclinks = ExtractFlagArgument(parsedArgs, "-l");
+        var maxsizekb = ExtractIntArgument(parsedArgs, "-m", -1);
         Throttle = ExtractIntArgument(parsedArgs, "-p", Throttle);
-        var teams = ExtractArrayArguments(parsedArgs, "-m");
         var reponamepatterns = ExtractArrayArguments(parsedArgs, "-n");
+        var reponamepatternsexclude = ExtractArrayArguments(parsedArgs, "-o");
         var recurse = ExtractFlagArgument(parsedArgs, "-r");
         Timeout = ExtractIntArgument(parsedArgs, "-t", Timeout);
 
@@ -42,7 +45,8 @@ class Program
             parsedArgs[0] == "ghclone" && (parsedArgs[1].StartsWith("orgs/") || parsedArgs[1].StartsWith("users/")))
         {
             var githubtoken = Environment.GetEnvironmentVariable("GITHUB_TOKEN") ?? string.Empty;
-            return await SuperClone(parsedArgs[1], githubtoken, usebearer, parsedArgs.Count == 3 ? parsedArgs[2] : string.Empty, teams, reponamepatterns, createsymboliclinks) ? 0 : 1;
+            return await SuperClone(parsedArgs[1], githubtoken, usebearer, parsedArgs.Count == 3 ? parsedArgs[2] : string.Empty,
+                teams, reponamepatterns, reponamepatternsexclude, maxsizekb, createsymboliclinks) ? 0 : 1;
         }
 
         if (parsedArgs.Count != 1)
@@ -50,14 +54,16 @@ class Program
             Console.WriteLine(
                 "Usage:\n" +
                 "superpull [-b] [-p throttle] [-t timeout] [-r] <folder>\n" +
-                "superpull [-b] [-p throttle] [-t timeout] ghclone [-l] [-m team] [-n regex] orgs/<orgname> [folder]\n" +
-                "superpull [-b] [-p throttle] [-t timeout] ghclone [-l] [-m team] [-n regex] users/<username> [folder]\n" +
+                "superpull [-b] [-p throttle] [-t timeout] ghclone [-e team] [-l] [-m size] [-n regex] [-o regex] orgs/<orgname> [folder]\n" +
+                "superpull [-b] [-p throttle] [-t timeout] ghclone [-e team] [-l] [-m size] [-n regex] [-o regex] users/<username> [folder]\n" +
                 "\n" +
                 "ghclone: Clone all github repos, either from an org or a user.\n" +
                 "-b:      Use bearer token auth, instead of basic auth.\n" +
+                "-e:      Filter repos for specific team. Can be specified multiple times.\n" +
                 "-l:      Create symbolic links between repos, based on git submodules.\n" +
-                "-m:      Filter repos for specific team. Can be specified multiple times.\n" +
+                "-m:      Filter repos for max size in kb of the .git folder, transferred over the network.\n" +
                 "-n:      Filter repos for specific name, using regex. Can be specified multiple times.\n" +
+                "-o:      Exclude filter repos for specific name, using regex. Can be specified multiple times.\n" +
                 "-p:      Throttle parallel git pull/clone processes (default: 10).\n" +
                 "-r:      Recurse subfolders, looking for any .git folder to pull.\n" +
                 "-t:      Timeout, in seconds (default: 60s).\n" +
@@ -197,7 +203,8 @@ class Program
         return true;
     }
 
-    static async Task<bool> SuperClone(string entity, string githubtoken, bool usebearer, string rootfolder, string[] teams, string[] reponamepatterns, bool createsymboliclinks)
+    static async Task<bool> SuperClone(string entity, string githubtoken, bool usebearer, string rootfolder,
+        string[] teams, string[] reponamepatterns, string[] reponamepatternsexclude, int maxsizekb, bool createsymboliclinks)
     {
         var watch = Stopwatch.StartNew();
 
@@ -208,7 +215,7 @@ class Program
             _ = Directory.CreateDirectory(folder);
         }
 
-        var repos = await GetRepoUrls(entity, githubtoken, usebearer, reponamepatterns, teams);
+        var repos = await GetRepoUrls(entity, githubtoken, usebearer, reponamepatterns, reponamepatternsexclude, maxsizekb, teams);
         var repourls = repos.repourls;
         if (repourls.Length == 0)
         {
@@ -387,7 +394,8 @@ class Program
         }
     }
 
-    static async Task<(string[] repourls, int totalrepos)> GetRepoUrls(string entity, string githubtoken, bool usebearer, string[] reponamepatterns, string[] teams)
+    static async Task<(string[] repourls, int totalrepos)> GetRepoUrls(string entity, string githubtoken, bool usebearer,
+        string[] reponamepatterns, string[] reponamepatternsexclude, int maxsizekb, string[] teams)
     {
         List<GithubRepository> repos = [];
 
@@ -409,8 +417,24 @@ class Program
 
         var totalrepos = repos.Count;
 
-        Regex[] regexes = [.. reponamepatterns.Select(p => new Regex(p))];
-        string[] repourls = [.. (reponamepatterns.Length > 0 ? repos.Where(r => regexes.Any(re => re.IsMatch(r.name))) : repos).Select(r => r.clone_url)];
+        if (maxsizekb >= 0)
+        {
+            repos = [.. repos.Where(r => r.size <= maxsizekb)];
+        }
+
+        if (reponamepatterns.Length > 0)
+        {
+            Regex[] regexes = [.. reponamepatterns.Select(p => new Regex(p))];
+            repos = [.. repos.Where(r => regexes.Any(re => re.IsMatch(r.name)))];
+        }
+
+        if (reponamepatternsexclude.Length > 0)
+        {
+            Regex[] regexes = [.. reponamepatternsexclude.Select(p => new Regex(p))];
+            repos = [.. repos.Where(r => regexes.All(re => !re.IsMatch(r.name)))];
+        }
+
+        string[] repourls = [.. repos.Select(r => r.clone_url)];
 
         for (var i = 0; i < repourls.Length; i++)
         {
@@ -435,12 +459,12 @@ class Program
 
         while (address != string.Empty)
         {
-            Console.WriteLine($"Getting repos: '{address}'");
+            Console.WriteLine($"Getting repos: '{client.BaseAddress}{address}'");
 
             var content = string.Empty;
             try
             {
-                using HttpResponseMessage response = await client.GetAsync(new Uri(address));
+                using HttpResponseMessage response = await client.GetAsync(address);
 
                 if (response.StatusCode == HttpStatusCode.NotFound)
                 {
