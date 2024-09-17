@@ -459,7 +459,7 @@ class Program
 
         while (address != string.Empty)
         {
-            Console.WriteLine($"Getting repos: '{client.BaseAddress}{address}'");
+            Console.WriteLine($"Getting repos: '{address}'");
 
             var content = string.Empty;
             try
