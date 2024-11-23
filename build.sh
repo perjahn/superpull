@@ -14,7 +14,7 @@ build_arch() {
 
   dotnet publish -c Release -r "$1" -p:PublishSingleFile=true --self-contained
 
-  cd "bin/Release/net8.0/$1/publish"
+  cd "bin/Release/net9.0/$1/publish"
   mv superpull spull
   if [ -x "$(command -v xattr)" ]; then
     echo 'Removing extended attributes.'
