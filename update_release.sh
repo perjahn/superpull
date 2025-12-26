@@ -40,6 +40,7 @@ if [ -z "$RELEASE_ID" ] || [ "$RELEASE_ID" = "null" ]; then
 fi
 
 echo 'Uploading assets...'
+curl -s -X POST -H "$accept" -H "$auth" -H "$apiversion" "$baseurluploads/releases/$RELEASE_ID/assets?name=spull-linux-arm64.tar.gz" --data-binary "@spull-linux-arm64.tar.gz" -H "$contenttype" > /dev/null
 curl -s -X POST -H "$accept" -H "$auth" -H "$apiversion" "$baseurluploads/releases/$RELEASE_ID/assets?name=spull-linux-x64.tar.gz" --data-binary "@spull-linux-x64.tar.gz" -H "$contenttype" > /dev/null
 curl -s -X POST -H "$accept" -H "$auth" -H "$apiversion" "$baseurluploads/releases/$RELEASE_ID/assets?name=spull-osx-arm64.tar.gz" --data-binary "@spull-osx-arm64.tar.gz" -H "$contenttype" > /dev/null
 

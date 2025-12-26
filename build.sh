@@ -14,7 +14,7 @@ build_arch() {
 
   dotnet publish -c Release -r "$1" -p:PublishSingleFile=true --self-contained
 
-  cd "bin/Release/net9.0/$1/publish"
+  cd "bin/Release/net10.0/$1/publish"
   mv superpull spull
   if [ -x "$(command -v xattr)" ]; then
     echo 'Removing extended attributes.'
@@ -31,5 +31,6 @@ build_arch() {
   gzip -9 -v "spull-$1.tar"
 }
 
+build_arch 'linux-arm64'
 build_arch 'linux-x64'
 build_arch 'osx-arm64'
