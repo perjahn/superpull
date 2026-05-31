@@ -21,6 +21,12 @@ if [ ! -z "$latest" ]; then
   fi
 fi
 
+tags=$(curl -s -H "$accept" -H "$auth" -H "$apiversion" "$baseurl/tags")
+for tag in $(jq -r '.[].name' <<< "$tags"); do
+  echo "Deleting tag: '$tag'"
+  curl -s -X DELETE -H "$accept" -H "$auth" -H "$apiversion" "$baseurl/git/refs/tags/$tag" > /dev/null
+done
+
 json='{"tag_name":"v1.0.'"$GITHUB_RUN_NUMBER"'","name":"v1.0.'"$GITHUB_RUN_NUMBER"'"}'
 
 echo 'Creating new release...'
